@@ -1,0 +1,1 @@
+import {Router} from 'express';import {prisma} from '../db.js';import {requireAuth,allow} from '../middleware/auth.js';const r=Router();r.use(requireAuth,allow('SUPER_ADMIN'));r.get('/',async(_req,res)=>res.json(await prisma.auditLog.findMany({orderBy:{timestamp:'desc'},take:1000})));export default r;

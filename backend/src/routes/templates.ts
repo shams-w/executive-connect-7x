@@ -1,0 +1,12 @@
+import {Router} from 'express';import {z} from 'zod';import {prisma} from '../db.js';import {requireAuth,allow} from '../middleware/auth.js';import {audit} from '../services/audit.js';
+const r=Router();r.use(requireAuth);
+const VARIABLES=['firstName','lastName','fullName','yearsOfService'] as const;
+const fields={internalName:z.string().trim().min(1,'Internal name is required').max(100),metaTemplateName:z.string().trim().min(1,'Meta template name is required').max(512),metaTemplateLanguage:z.string().trim().min(2,'Meta language code is required').max(15),eventType:z.enum(['BIRTHDAY','WORK_ANNIVERSARY']),language:z.enum(['EN','AR']),metaCategory:z.string().trim().max(30),variables:z.array(z.enum(VARIABLES)).max(5),bodyText:z.string().max(1024).nullable(),isActive:z.boolean()};
+const createSchema=z.object({...fields,metaCategory:fields.metaCategory.default('UTILITY'),variables:fields.variables.default([]),bodyText:fields.bodyText.optional(),isActive:fields.isActive.default(true)});
+// No defaults here: a partial update must only touch the fields actually sent.
+const updateSchema=z.object(fields).partial();
+const firstError=(e:z.ZodError)=>e.issues[0]?.message??'Invalid template';
+r.get('/',async(_req,res)=>res.json(await prisma.messageTemplate.findMany({orderBy:{internalName:'asc'}})));
+r.post('/',allow('SUPER_ADMIN','COMMUNICATIONS_ADMIN'),async(req,res)=>{const p=createSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:firstError(p.error)});if(await prisma.messageTemplate.findUnique({where:{internalName:p.data.internalName}}))return res.status(409).json({error:'A template with this internal name already exists'});const t=await prisma.messageTemplate.create({data:p.data});await audit(req.user,'TEMPLATE_CREATED','MessageTemplate',t.id,{internalName:t.internalName},req.ip);res.status(201).json(t);});
+r.patch('/:id',allow('SUPER_ADMIN','COMMUNICATIONS_ADMIN'),async(req,res)=>{const id=String(req.params.id);const p=updateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:firstError(p.error)});if(p.data.internalName){const clash=await prisma.messageTemplate.findFirst({where:{internalName:p.data.internalName,id:{not:id}}});if(clash)return res.status(409).json({error:'A template with this internal name already exists'});}const t=await prisma.messageTemplate.update({where:{id},data:p.data});await audit(req.user,'TEMPLATE_UPDATED','MessageTemplate',t.id,{fields:Object.keys(p.data)},req.ip);res.json(t);});
+export default r;

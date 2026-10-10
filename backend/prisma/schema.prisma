@@ -1,0 +1,255 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  HR_ADMIN
+  COMMUNICATIONS_ADMIN
+  VIEWER
+}
+enum Language {
+  EN
+  AR
+}
+enum EventType {
+  BIRTHDAY
+  WORK_ANNIVERSARY
+  WELCOME
+  PROMOTION
+  RETIREMENT
+  CUSTOM
+}
+enum CelebrationStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  QUEUED
+  SENT
+  CANCELLED
+  EXPIRED
+}
+enum DeliveryStatus {
+  PENDING
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  CANCELLED
+}
+enum ImportStatus {
+  UPLOADED
+  VALIDATED
+  CONFIRMED
+  COMPLETED
+  FAILED
+}
+enum ImportRowStatus {
+  VALID
+  WARNING
+  ERROR
+  NEW
+  UPDATE
+  UNCHANGED
+  SKIPPED
+}
+enum InboundMode {
+  STORE_ONLY
+  ROUTE_TO_CORPORATE_INBOX
+  AUTO_ACKNOWLEDGE
+  DISABLED
+}
+enum InboundProcessingStatus {
+  STORED
+  ROUTED
+  ACKNOWLEDGED
+  IGNORED
+  FAILED
+}
+enum WhatsAppMode {
+  MOCK
+  META_TEST
+  META_PRODUCTION
+}
+enum SendPolicy {
+  AUTO
+  REVIEW
+}
+
+model User {
+  id String @id @default(uuid())
+  username String @unique
+  passwordHash String
+  displayName String
+  role Role
+  isActive Boolean @default(true)
+  mustChangePassword Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  refreshSessions RefreshSession[]
+  imports ExcelImport[]
+  auditLogs AuditLog[]
+}
+
+model RefreshSession {
+  id String @id @default(uuid())
+  userId String
+  tokenHash String @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+}
+
+model Employee {
+  id String @id @default(uuid())
+  employeeId String @unique
+  firstName String
+  lastName String?
+  fullName String
+  mobile String
+  email String?
+  birthday DateTime? @db.Date
+  joiningDate DateTime @db.Date
+  preferredLanguage Language @default(EN)
+  department String?
+  company String?
+  jobTitle String?
+  country String?
+  whatsappConsent Boolean @default(true)
+  isActive Boolean @default(true)
+  importedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  celebrationEvents CelebrationEvent[]
+  deliveries MessageDelivery[]
+  inboundMessages InboundMessage[]
+  importRows ExcelImportRow[]
+}
+
+model ExcelImport {
+  id String @id @default(uuid())
+  filename String
+  uploadedBy String
+  uploadedAt DateTime @default(now())
+  totalRows Int @default(0)
+  validRows Int @default(0)
+  invalidRows Int @default(0)
+  newRows Int @default(0)
+  updatedRows Int @default(0)
+  unchangedRows Int @default(0)
+  status ImportStatus @default(UPLOADED)
+  completedAt DateTime?
+  user User @relation(fields:[uploadedBy], references:[id])
+  rows ExcelImportRow[]
+}
+
+model ExcelImportRow {
+  id String @id @default(uuid())
+  importId String
+  rowNumber Int
+  employeeIdValue String?
+  status ImportRowStatus
+  errorMessages Json
+  normalizedData Json
+  employeeId String?
+  import ExcelImport @relation(fields:[importId], references:[id], onDelete:Cascade)
+  employee Employee? @relation(fields:[employeeId], references:[id])
+  @@index([importId])
+}
+
+model CelebrationEvent {
+  id String @id @default(uuid())
+  employeeId String
+  eventType EventType
+  eventYear Int
+  yearsOfService Int?
+  eventDate DateTime @db.Date
+  status CelebrationStatus @default(PENDING_APPROVAL)
+  templateId String?
+  createdAt DateTime @default(now())
+  employee Employee @relation(fields:[employeeId], references:[id])
+  template MessageTemplate? @relation(fields:[templateId], references:[id], onDelete:SetNull)
+  deliveries MessageDelivery[]
+  @@unique([employeeId,eventType,eventYear])
+  @@index([eventDate,status])
+}
+
+model MessageTemplate {
+  id String @id @default(uuid())
+  internalName String @unique
+  metaTemplateName String
+  metaTemplateLanguage String
+  eventType EventType
+  language Language
+  metaCategory String
+  variables Json
+  bodyText String?
+  isActive Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  celebrationEvents CelebrationEvent[]
+  @@index([eventType,language,isActive])
+}
+
+model MessageDelivery {
+  id String @id @default(uuid())
+  celebrationEventId String @unique
+  employeeId String
+  metaMessageId String? @unique
+  templateName String
+  recipientPhoneMasked String
+  status DeliveryStatus @default(PENDING)
+  queuedAt DateTime?
+  sentAt DateTime?
+  deliveredAt DateTime?
+  readAt DateTime?
+  failedAt DateTime?
+  failureCode String?
+  failureReason String?
+  retryCount Int @default(0)
+  nextAttemptAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  celebrationEvent CelebrationEvent @relation(fields:[celebrationEventId], references:[id])
+  employee Employee @relation(fields:[employeeId], references:[id])
+  @@index([status,nextAttemptAt])
+}
+
+model InboundMessage {
+  id String @id @default(uuid())
+  waMessageId String @unique
+  employeeId String?
+  phone String
+  messageType String
+  body String?
+  receivedAt DateTime @default(now())
+  processingStatus InboundProcessingStatus @default(STORED)
+  employee Employee? @relation(fields:[employeeId], references:[id])
+}
+
+model SystemSetting {
+  key String @id
+  value Json
+  isSecret Boolean @default(false)
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id String @id @default(uuid())
+  actorId String?
+  actor String
+  action String
+  entityType String?
+  entityId String?
+  metadata Json?
+  ip String?
+  timestamp DateTime @default(now())
+  user User? @relation(fields:[actorId], references:[id])
+  @@index([timestamp])
+}
