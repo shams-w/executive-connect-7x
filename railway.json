@@ -2,10 +2,11 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "RAILPACK",
-    "buildCommand": "npm run prisma:generate -w backend && npm run build -w backend"
+    "buildCommand": "npm run prisma:generate -w backend && npm run build -w backend && VITE_API_URL=/api npm run build -w frontend"
   },
   "deploy": {
-    "startCommand": "npm run prisma:deploy -w backend && npm run start -w backend",
+    "startCommand": "npm run prisma:deploy -w backend && node backend/dist/scripts/ensureAdmin.js && npm run start -w backend",
+    "healthcheckPath": "/api/health",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
