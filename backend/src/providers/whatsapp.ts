@@ -1,54 +1,438 @@
+
 import axios from 'axios';
 import crypto from 'node:crypto';
+import { env } from '../config/env.js';
 import { isTestAllowed } from '../services/testAllowlist.js';
-import { getWhatsAppConfig, type WhatsAppConfig } from '../services/whatsappConfig.js';
+import {
+  getWhatsAppConfig,
+  type WhatsAppConfig
+} from '../services/whatsappConfig.js';
 
-export type SendTemplateInput={to:string;templateName:string;language:string;variables:string[]};
-export type SendResult={messageId:string;status:'SENT'|'FAILED';errorCode?:string;errorReason?:string};
-export type ValidationResult={ok:boolean;message:string;phone?:{displayPhoneNumber?:string;verifiedName?:string;qualityRating?:string}};
-export type MetaTemplate={name:string;language:string;status:string;category?:string};
-export interface WhatsAppProvider{sendTemplateMessage(input:SendTemplateInput):Promise<SendResult>;validateConfiguration():Promise<ValidationResult>;verifyWebhookSignature(rawBody:Buffer,signature?:string):boolean;listTemplates?():Promise<MetaTemplate[]>;}
+export type SendTemplateInput = {
+  to: string;
+  templateName: string;
+  language: string;
+  variables: string[];
+};
 
-const metaError=(e:any)=>String(e?.response?.data?.error?.message??e?.message??'Request to Meta failed').slice(0,500);
+export type SendResult = {
+  messageId: string;
+  status: 'SENT' | 'FAILED';
+  errorCode?: string;
+  errorReason?: string;
+};
 
-export class MockWhatsAppProvider implements WhatsAppProvider{
- async sendTemplateMessage(input:SendTemplateInput):Promise<SendResult>{return {messageId:`mock_${Date.now()}_${input.to.slice(-4)}`,status:'SENT'};}
- async validateConfiguration(){return {ok:true,message:'MOCK mode is ready. No real WhatsApp message will be sent.'};}
- verifyWebhookSignature(){return true;}
+export type ValidationResult = {
+  ok: boolean;
+  message: string;
+  phone?: {
+    displayPhoneNumber?: string;
+    verifiedName?: string;
+    qualityRating?: string;
+  };
+};
+
+export type MetaTemplate = {
+  name: string;
+  language: string;
+  status: string;
+  category?: string;
+};
+
+export interface WhatsAppProvider {
+  sendTemplateMessage(input: SendTemplateInput): Promise<SendResult>;
+  validateConfiguration(): Promise<ValidationResult>;
+  verifyWebhookSignature(rawBody: Buffer, signature?: string): boolean;
+  listTemplates?(): Promise<MetaTemplate[]>;
 }
-export class MetaWhatsAppProvider implements WhatsAppProvider{
- constructor(private cfg:WhatsAppConfig){}
- private base(){return `https://graph.facebook.com/${this.cfg.graphApiVersion}`;}
- private headers(){return {Authorization:`Bearer ${this.cfg.accessToken}`,'Content-Type':'application/json'};}
- async sendTemplateMessage(input:SendTemplateInput):Promise<SendResult>{
-   if(this.cfg.mode==='META_TEST' && !(await isTestAllowed(input.to))) return {messageId:'',status:'FAILED',errorCode:'TEST_RECIPIENT_BLOCKED',errorReason:'Recipient is not on the approved TEST allowlist'};
-   if(!this.cfg.graphApiVersion||!this.cfg.accessToken||!this.cfg.phoneNumberId) return {messageId:'',status:'FAILED',errorCode:'CONFIG_MISSING',errorReason:'Meta credentials are incomplete'};
-   try{
-     const components=input.variables.length?[{type:'body',parameters:input.variables.map(text=>({type:'text',text}))}]:[];
-     const r=await axios.post(`${this.base()}/${this.cfg.phoneNumberId}/messages`,{messaging_product:'whatsapp',to:input.to,type:'template',template:{name:input.templateName,language:{code:input.language},components}},{headers:this.headers()});
-     return {messageId:r.data.messages?.[0]?.id??'',status:'SENT'};
-   }catch(e:any){return {messageId:'',status:'FAILED',errorCode:String(e.response?.data?.error?.code??'META_ERROR'),errorReason:metaError(e)};}
- }
- /** Real check: asks Meta for the phone number's details using the saved token. */
- async validateConfiguration():Promise<ValidationResult>{
-   const missing=[['API version',this.cfg.graphApiVersion],['Access token',this.cfg.accessToken],['Phone number ID',this.cfg.phoneNumberId],['WhatsApp Business Account ID',this.cfg.wabaId]].filter(([,v])=>!v).map(([k])=>k);
-   if(missing.length)return {ok:false,message:`Missing: ${missing.join(', ')}`};
-   try{const r=await axios.get(`${this.base()}/${this.cfg.phoneNumberId}`,{params:{fields:'display_phone_number,verified_name,quality_rating'},headers:this.headers(),timeout:15000});
-     return {ok:true,message:'Connected to WhatsApp.',phone:{displayPhoneNumber:r.data.display_phone_number,verifiedName:r.data.verified_name,qualityRating:r.data.quality_rating}};}
-   catch(e){return {ok:false,message:`Meta rejected the connection: ${metaError(e)}`};}
- }
- async listTemplates():Promise<MetaTemplate[]>{
-   const out:MetaTemplate[]=[];let url:string|undefined=`${this.base()}/${this.cfg.wabaId}/message_templates`;let params:any={fields:'name,language,status,category',limit:200};
-   for(let page=0;url&&page<10;page++){const r:any=await axios.get(url,{params,headers:this.headers(),timeout:15000});out.push(...(r.data.data??[]));url=r.data.paging?.next;params=undefined;}
-   return out;
- }
- verifyWebhookSignature(rawBody:Buffer,signature?:string){
-   if(!this.cfg.appSecret||!signature?.startsWith('sha256=')) return false;
-   const expected='sha256='+crypto.createHmac('sha256',this.cfg.appSecret).update(rawBody).digest('hex');
-   const a=Buffer.from(expected),b=Buffer.from(signature);
-   return a.length===b.length && crypto.timingSafeEqual(a,b);
- }
+
+const normalizePhone = (value: string) =>
+  value.replace(/\D/g, '');
+
+const failure = (
+  errorCode: string,
+  errorReason: string
+): SendResult => ({
+  messageId: '',
+  status: 'FAILED',
+  errorCode,
+  errorReason
+});
+
+const apiError = (error: any) =>
+  String(
+    error?.response?.data?.error?.message ??
+    error?.message ??
+    'WhatsApp API request failed'
+  ).slice(0, 500);
+
+const templateComponents = (variables: string[]) =>
+  variables.length
+    ? [{
+        type: 'body',
+        parameters: variables.map(text => ({
+          type: 'text',
+          text
+        }))
+      }]
+    : [];
+
+// Shared safety guard for real WhatsApp sending
+async function checkSendSafety(
+  to: string,
+  mode: string
+): Promise<SendResult | null> {
+  // Global emergency stop for real sending
+  if (!env.DIALOG360_SEND_ENABLED) {
+    return failure(
+      'SENDING_DISABLED',
+      'Real WhatsApp sending is disabled'
+    );
+  }
+
+  // This integration is restricted to test recipients
+  if (mode !== 'DIALOG360_TEST') {
+    return failure(
+      'MODE_BLOCKED',
+      'Only DIALOG360_TEST is allowed during testing'
+    );
+  }
+
+  const numbers = env.DIALOG360_TEST_NUMBERS
+    .split(',')
+    .map(normalizePhone)
+    .filter(Boolean);
+
+  const allowed = new Set(numbers);
+
+  if (
+    numbers.length !== 3 ||
+    allowed.size !== 3 ||
+    !allowed.has(normalizePhone(to))
+  ) {
+    return failure(
+      'TEST_RECIPIENT_BLOCKED',
+      'Recipient is not one of the three approved test numbers'
+    );
+  }
+
+  return null;
 }
-export async function provider():Promise<WhatsAppProvider>{const cfg=await getWhatsAppConfig();return cfg.mode==='MOCK'?new MockWhatsAppProvider():new MetaWhatsAppProvider(cfg);}
-/** A Meta provider built from the saved settings even while the app is in MOCK mode, so the connection can be tested first. */
-export async function metaProvider(){return new MetaWhatsAppProvider(await getWhatsAppConfig());}
+
+export class MockWhatsAppProvider implements WhatsAppProvider {
+  async sendTemplateMessage(
+    input: SendTemplateInput
+  ): Promise<SendResult> {
+    return {
+      messageId: `mock_${Date.now()}_${input.to.slice(-4)}`,
+      status: 'SENT'
+    };
+  }
+
+  async validateConfiguration(): Promise<ValidationResult> {
+    return {
+      ok: true,
+      message: 'MOCK mode ready. No real message will be sent.'
+    };
+  }
+
+  verifyWebhookSignature(): boolean {
+    return true;
+  }
+}
+
+export class MetaWhatsAppProvider implements WhatsAppProvider {
+  constructor(private cfg: WhatsAppConfig) {}
+
+  private base() {
+    return `https://graph.facebook.com/${this.cfg.graphApiVersion}`;
+  }
+
+  private headers() {
+    return {
+      Authorization: `Bearer ${this.cfg.accessToken}`,
+      'Content-Type': 'application/json'
+    };
+  }
+
+  async sendTemplateMessage(
+    input: SendTemplateInput
+  ): Promise<SendResult> {
+    // Block Meta sending while 360dialog testing is configured
+    if (env.DIALOG360_SEND_ENABLED) {
+      return failure(
+        'META_SENDING_BLOCKED',
+        'Meta sending is disabled during 360dialog testing'
+      );
+    }
+
+    if (
+      this.cfg.mode === 'META_TEST' &&
+      !(await isTestAllowed(input.to))
+    ) {
+      return failure(
+        'TEST_RECIPIENT_BLOCKED',
+        'Recipient is not on the Meta test allowlist'
+      );
+    }
+
+    if (
+      !this.cfg.graphApiVersion ||
+      !this.cfg.accessToken ||
+      !this.cfg.phoneNumberId
+    ) {
+      return failure(
+        'CONFIG_MISSING',
+        'Meta credentials are incomplete'
+      );
+    }
+
+    try {
+      const response = await axios.post(
+        `${this.base()}/${this.cfg.phoneNumberId}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to: input.to,
+          type: 'template',
+          template: {
+            name: input.templateName,
+            language: { code: input.language },
+            components: templateComponents(input.variables)
+          }
+        },
+        {
+          headers: this.headers(),
+          timeout: 15000
+        }
+      );
+
+      return {
+        messageId: response.data.messages?.[0]?.id ?? '',
+        status: 'SENT'
+      };
+    } catch (error: any) {
+      return failure(
+        String(error.response?.data?.error?.code ?? 'META_ERROR'),
+        apiError(error)
+      );
+    }
+  }
+
+  async validateConfiguration(): Promise<ValidationResult> {
+    const missing = [
+      ['API version', this.cfg.graphApiVersion],
+      ['Access token', this.cfg.accessToken],
+      ['Phone number ID', this.cfg.phoneNumberId],
+      ['WhatsApp Business Account ID', this.cfg.wabaId]
+    ].filter(([, value]) => !value).map(([key]) => key);
+
+    if (missing.length) {
+      return {
+        ok: false,
+        message: `Missing: ${missing.join(', ')}`
+      };
+    }
+
+    try {
+      const response = await axios.get(
+        `${this.base()}/${this.cfg.phoneNumberId}`,
+        {
+          params: {
+            fields: 'display_phone_number,verified_name,quality_rating'
+          },
+          headers: this.headers(),
+          timeout: 15000
+        }
+      );
+
+      return {
+        ok: true,
+        message: 'Connected to Meta WhatsApp.',
+        phone: {
+          displayPhoneNumber: response.data.display_phone_number,
+          verifiedName: response.data.verified_name,
+          qualityRating: response.data.quality_rating
+        }
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: `Meta connection failed: ${apiError(error)}`
+      };
+    }
+  }
+
+  async listTemplates(): Promise<MetaTemplate[]> {
+    const output: MetaTemplate[] = [];
+
+    let url: string | undefined =
+      `${this.base()}/${this.cfg.wabaId}/message_templates`;
+
+    let params: any = {
+      fields: 'name,language,status,category',
+      limit: 200
+    };
+
+    for (let page = 0; url && page < 10; page++) {
+      const response: any = await axios.get(url, {
+        params,
+        headers: this.headers(),
+        timeout: 15000
+      });
+
+      output.push(...(response.data.data ?? []));
+      url = response.data.paging?.next;
+      params = undefined;
+    }
+
+    return output;
+  }
+
+  verifyWebhookSignature(
+    rawBody: Buffer,
+    signature?: string
+  ): boolean {
+    if (
+      !this.cfg.appSecret ||
+      !signature?.startsWith('sha256=')
+    ) {
+      return false;
+    }
+
+    const expected = 'sha256=' +
+      crypto.createHmac('sha256', this.cfg.appSecret)
+        .update(rawBody)
+        .digest('hex');
+
+    const a = Buffer.from(expected);
+    const b = Buffer.from(signature);
+
+    return a.length === b.length &&
+      crypto.timingSafeEqual(a, b);
+  }
+}
+
+// 360dialog integration
+export class Dialog360WhatsAppProvider
+  implements WhatsAppProvider {
+
+  async sendTemplateMessage(
+    input: SendTemplateInput
+  ): Promise<SendResult> {
+    const blocked = await checkSendSafety(
+      input.to,
+      'DIALOG360_TEST'
+    );
+
+    if (blocked) return blocked;
+
+    if (!env.DIALOG360_API_KEY) {
+      return failure(
+        'CONFIG_MISSING',
+        '360dialog API key is missing'
+      );
+    }
+
+    try {
+      const response = await axios.post(
+        `${env.DIALOG360_API_BASE_URL.replace(/\/$/, '')}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: normalizePhone(input.to),
+          type: 'template',
+          template: {
+            name: input.templateName,
+            language: { code: input.language },
+            components: templateComponents(input.variables)
+          }
+        },
+        {
+          headers: {
+            'D360-API-KEY': env.DIALOG360_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          timeout: 15000
+        }
+      );
+
+      const messageId = response.data.messages?.[0]?.id;
+
+      if (!messageId) {
+        return failure(
+          'NO_MESSAGE_ID',
+          '360dialog did not return a message ID'
+        );
+      }
+
+      return {
+        messageId,
+        status: 'SENT'
+      };
+    } catch (error: any) {
+      return failure(
+        String(
+          error.response?.data?.error?.code ??
+          'DIALOG360_ERROR'
+        ),
+        apiError(error)
+      );
+    }
+  }
+
+  async validateConfiguration(): Promise<ValidationResult> {
+    if (!env.DIALOG360_API_KEY) {
+      return {
+        ok: false,
+        message: '360dialog API key is missing'
+      };
+    }
+
+    const numbers = env.DIALOG360_TEST_NUMBERS
+      .split(',')
+      .map(normalizePhone)
+      .filter(Boolean);
+
+    if (numbers.length !== 3 || new Set(numbers).size !== 3) {
+      return {
+        ok: false,
+        message: 'Exactly three unique test numbers are required'
+      };
+    }
+
+    return {
+      ok: true,
+      message: '360dialog settings are present. Connection not yet verified.'
+    };
+  }
+
+  // Do not accept unverified incoming webhooks
+  verifyWebhookSignature(): boolean {
+    return false;
+  }
+}
+
+export async function provider(): Promise<WhatsAppProvider> {
+  const cfg = await getWhatsAppConfig();
+
+  if (cfg.mode === 'MOCK') {
+    return new MockWhatsAppProvider();
+  }
+
+  if (cfg.mode === 'DIALOG360_TEST') {
+    return new Dialog360WhatsAppProvider();
+  }
+
+  if (
+    cfg.mode === 'META_TEST' ||
+    cfg.mode === 'META_PRODUCTION'
+  ) {
+    return new MetaWhatsAppProvider(cfg);
+  }
+
+  throw new Error('Unsupported WhatsApp mode');
+}
+
+export async function metaProvider() {
+  return new MetaWhatsAppProvider(await getWhatsAppConfig());
+}
