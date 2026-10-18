@@ -69,6 +69,23 @@ export async function createEligibleEvents(
     }
   }
 
+  // Under AUTO, today's events left waiting from an earlier REVIEW policy are sent too.
+  if (settings.sendPolicy === 'AUTO') {
+    const today = todayInZone(settings.timezone, now);
+
+    await prisma.celebrationEvent.updateMany({
+      where: {
+        status: 'PENDING_APPROVAL',
+        eventDate: {
+          gte: today,
+          lt: new Date(today.getTime() + DAY_MS)
+        },
+        ...(only ? { eventType: only } : {})
+      },
+      data: { status: 'APPROVED' }
+    });
+  }
+
   return { created };
 }
 

@@ -69,11 +69,11 @@ const schema = z.object({
     .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
     .default('09:00'),
 
-  // Require manual review during testing
+  // Send automatically on the celebration day; REVIEW requires manual approval
   SEND_POLICY: z.enum([
     'AUTO',
     'REVIEW'
-  ]).default('REVIEW'),
+  ]).default('AUTO'),
 
   INBOUND_MODE: z.enum([
     'STORE_ONLY',
