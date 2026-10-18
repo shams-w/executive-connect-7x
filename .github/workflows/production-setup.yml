@@ -45,6 +45,9 @@ jobs:
             echo "::notice title=Send policy::$(echo "$OUT" | jq -r '.settings.sendPolicy // .error')"
           fi
 
+          JS=$(curl -sS "${BASE%/}/" | grep -o 'assets/index-[^"]*\.js' | head -1)
+          echo "::notice title=Dashboard version::$JS has template submit button: $(curl -sS "${BASE%/}/$JS" | grep -c 'Submit missing templates to 360dialog')"
+
           SETTINGS=$(call GET /admin-settings)
           WA=$(call GET /settings/whatsapp)
           CHECK=$(call GET /settings/production-checklist)
