@@ -54,8 +54,15 @@ const MODE_LABELS: Record<string, string> = {
   MOCK: 'Simulation — no real messages',
   META_TEST: 'Meta Test — approved test numbers only',
   META_PRODUCTION: 'Meta Live — real messages to employees',
-  DIALOG360_TEST: '360dialog Test — approved test numbers only'
+  DIALOG360_TEST: '360dialog Test — approved test numbers only',
+  DIALOG360_PRODUCTION: '360dialog Live — real messages to employees'
 };
+
+const is360Mode = (mode?: string) =>
+  mode === 'DIALOG360_TEST' || mode === 'DIALOG360_PRODUCTION';
+
+const isLiveMode = (mode?: string) =>
+  mode === 'META_PRODUCTION' || mode === 'DIALOG360_PRODUCTION';
 
 const STATUS_STYLE: Record<string, string> = {
   APPROVED: 'bg-green-100 text-green-800',
@@ -74,7 +81,7 @@ const STATUS_LABELS: Record<string, string> = {
   PAUSED: 'Paused',
   DISABLED: 'Disabled',
   IN_APPEAL: 'In appeal',
-  NOT_FOUND: 'Not found in Meta'
+  NOT_FOUND: 'Not found on the account'
 };
 
 export default function WhatsApp() {
@@ -135,7 +142,7 @@ function StatusCard({ data }: { data: any }) {
   const mode = data?.mode ?? 'MOCK';
 
   const tone =
-    mode === 'META_PRODUCTION'
+    isLiveMode(mode)
       ? 'border-green-300 bg-green-50 text-green-900'
       : mode === 'META_TEST' || mode === 'DIALOG360_TEST'
         ? 'border-blue-300 bg-blue-50 text-blue-900'
@@ -154,7 +161,7 @@ function StatusCard({ data }: { data: any }) {
       <div className="text-sm mt-1 opacity-80">
         {t('Provider')}: {data?.provider ?? '—'}
 
-        {mode !== 'DIALOG360_TEST' && (
+        {!is360Mode(mode) && (
           <>
             {' · '}
             {t('Phone number ID')}:{' '}
@@ -202,7 +209,7 @@ function ConnectCard({
   const [check, setCheck] = useState<any>(null);
   const [confirmReset, setConfirmReset] = useState(false);
 
-  const is360 = mode === 'DIALOG360_TEST';
+  const is360 = is360Mode(mode);
 
   const refreshMode = () =>
     qc.invalidateQueries({ queryKey: ['health'] });
@@ -233,11 +240,14 @@ function ConnectCard({
     try {
       const body: Record<string, string> = {};
 
-      if (!is360) {
-        Object.assign(body, f);
+      if (is360) {
+        if (f.dialog360ApiKey) body.dialog360ApiKey = f.dialog360ApiKey;
+      } else {
+        const { dialog360ApiKey: _key, ...meta } = f;
+        Object.assign(body, meta);
       }
 
-      if (mode !== 'META_PRODUCTION') {
+      if (!isLiveMode(mode)) {
         body.mode = mode;
       }
 
@@ -247,7 +257,8 @@ function ConnectCard({
         ...x,
         accessToken: '',
         appSecret: '',
-        webhookVerifyToken: ''
+        webhookVerifyToken: '',
+        dialog360ApiKey: ''
       }));
 
       await refetch();
@@ -345,7 +356,9 @@ function ConnectCard({
 
           <p className="muted text-sm mt-1 max-w-3xl">
             {is360
-              ? '360dialog API credentials are configured securely in Railway. Meta credentials are not required for 360dialog test mode.'
+              ? t(
+                  'Enter the API key from your 360dialog Hub. It is stored encrypted and never shown again — leave it empty to keep the saved one.'
+                )
               : t(
                   'Copy these values from your Meta (Facebook) developer account. Secret values are stored encrypted and are never shown again — leave a secret empty to keep the saved one.'
                 )}
@@ -440,28 +453,41 @@ function ConnectCard({
       )}
 
       {is360 && (
-        <div className="mt-5 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
-          <b>360dialog Test Configuration</b>
+        <label className="block mt-5 max-w-xl">
+          <div className="flex justify-between gap-2">
+            <span className="text-sm font-semibold">
+              {t('360dialog API key')}
+            </span>
 
-          <p className="mt-2">
-            The API key and API base URL are managed in
-            Railway environment variables.
-          </p>
+            <span className="muted text-xs">
+              {sourceLabel(c.dialog360ApiKey)}
 
-          <p className="mt-2">
-            Real sending remains disabled while
-            DIALOG360_SEND_ENABLED is false.
-          </p>
+              {c.dialog360ApiKey?.hint
+                ? ` (${t('ends with')} ${c.dialog360ApiKey.hint})`
+                : ''}
+            </span>
+          </div>
 
-          <p className="mt-2">
-            Test mode requires exactly three approved
-            numbers configured in DIALOG360_TEST_NUMBERS.
-          </p>
+          <input
+            className="input mt-1"
+            dir="ltr"
+            type="password"
+            autoComplete="off"
+            placeholder={
+              c.dialog360ApiKey?.source !== 'none'
+                ? t('Leave empty to keep the saved value')
+                : ''
+            }
+            value={f.dialog360ApiKey ?? ''}
+            onChange={e => set('dialog360ApiKey', e.target.value)}
+          />
 
-          <p className="mt-2">
-            This page does not display or expose the API key.
-          </p>
-        </div>
+          <div className="muted text-xs mt-1">
+            {t(
+              '360dialog Hub → your number → API key (generate one if you have not saved it).'
+            )}
+          </div>
+        </label>
       )}
 
       <div className="mt-6">
@@ -493,23 +519,21 @@ function ConnectCard({
             </label>
           ))}
 
-          {data.mode === 'META_PRODUCTION' && (
+          {isLiveMode(data.mode) && (
             <label
               className={`flex items-center gap-2 border rounded-lg px-3 py-2 text-sm cursor-pointer ${
-                mode === 'META_PRODUCTION'
+                mode === data.mode
                   ? 'border-green-500 bg-green-50 dark:bg-slate-800'
                   : 'border-slate-200'
               }`}
             >
               <input
                 type="radio"
-                checked={mode === 'META_PRODUCTION'}
-                onChange={() =>
-                  setMode('META_PRODUCTION')
-                }
+                checked={mode === data.mode}
+                onChange={() => setMode(data.mode)}
               />
 
-              {t(MODE_LABELS.META_PRODUCTION)}
+              {t(MODE_LABELS[data.mode])}
             </label>
           )}
         </div>
@@ -518,8 +542,6 @@ function ConnectCard({
           {t(
             'Live mode is switched on from Admin Settings → Production Activation, after the checklist passes.'
           )}
-          {' '}
-          360dialog production mode is not enabled yet.
         </div>
       </div>
 
@@ -628,9 +650,27 @@ function WebhookCard({ data }: { data: any }) {
 
   const url = `${base}/webhooks/meta/whatsapp`;
   const local = /localhost|127\.0\.0\.1/.test(url);
-  const is360 = data?.mode === 'DIALOG360_TEST';
+  const is360 = is360Mode(data?.mode);
+  const qc = useQueryClient();
 
   const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function connect360() {
+    setBusy(true);
+    setMsg(null);
+
+    try {
+      await api.post('/settings/whatsapp/dialog360/webhook');
+      await qc.invalidateQueries({ queryKey: ['wa-settings'] });
+      setMsg({ ok: true, text: t('Webhook connected.') });
+    } catch (e: any) {
+      setMsg({ ok: false, text: apiError(t, e, 'Webhook connection failed') });
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function copy() {
     try {
@@ -649,11 +689,50 @@ function WebhookCard({ data }: { data: any }) {
       </b>
 
       {is360 ? (
-        <p className="muted text-sm mt-1">
-          360dialog webhook integration is not configured
-          in this application yet. Do not use the Meta
-          webhook URL below for 360dialog.
-        </p>
+        <>
+          <p className="muted text-sm mt-1">
+            {t(
+              'Tells 360dialog to send delivery receipts and replies to this app. Save the API key above first. Click again if you change the API key or the app address.'
+            )}
+          </p>
+
+          <div className="flex items-center gap-3 mt-4">
+            <button
+              className="btn btn-primary"
+              disabled={busy || local}
+              onClick={connect360}
+            >
+              {busy ? t('Connecting…') : t('Connect webhook to 360dialog')}
+            </button>
+
+            <span className="text-sm">
+              {t('Status')}:{' '}
+              <b>
+                {data?.webhookConfigured
+                  ? t('Configured')
+                  : t('Not configured')}
+              </b>
+            </span>
+          </div>
+
+          {local && (
+            <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-sm px-3 py-2">
+              {t(
+                'This is a local address, which 360dialog cannot reach. Connect the webhook from the hosted dashboard.'
+              )}
+            </div>
+          )}
+
+          {msg && (
+            <div
+              className={`mt-3 text-sm ${
+                msg.ok ? 'text-green-700' : 'text-red-700'
+              }`}
+            >
+              {msg.text}
+            </div>
+          )}
+        </>
       ) : (
         <>
           <p className="muted text-sm mt-1">
@@ -712,7 +791,7 @@ function TemplateCheckCard({
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const is360 = mode === 'DIALOG360_TEST';
+  const is360 = is360Mode(mode);
 
   async function run() {
     setBusy(true);
@@ -742,24 +821,26 @@ function TemplateCheckCard({
 
           <p className="muted text-sm mt-1">
             {is360
-              ? '360dialog template approval must currently be verified in 360dialog Manager. Automatic synchronization is not configured yet.'
+              ? t(
+                  'Compares the active templates in this app with the templates approved on your 360dialog account. Messages only send with approved templates whose name and language match exactly.'
+                )
               : t(
                   'Compares the active templates in this app with the templates Meta has approved for your account. Messages only send with approved templates whose name and language match exactly.'
                 )}
           </p>
         </div>
 
-        {!is360 && (
-          <button
-            className="btn whitespace-nowrap"
-            disabled={busy}
-            onClick={run}
-          >
-            {busy
-              ? t('Checking…')
+        <button
+          className="btn whitespace-nowrap"
+          disabled={busy}
+          onClick={run}
+        >
+          {busy
+            ? t('Checking…')
+            : is360
+              ? t('Check templates with 360dialog')
               : t('Check templates with Meta')}
-          </button>
-        )}
+        </button>
       </div>
 
       {err && (
@@ -768,12 +849,12 @@ function TemplateCheckCard({
         </div>
       )}
 
-      {rows && !is360 && (
+      {rows && (
         <table className="mt-4">
           <thead>
             <tr>
               <th>{t('Template')}</th>
-              <th>{t('Meta template')}</th>
+              <th>{is360 ? t('360dialog template') : t('Meta template')}</th>
               <th>{t('Language')}</th>
               <th>{t('Status')}</th>
               <th>{t('Category')}</th>
@@ -920,9 +1001,7 @@ function TestMessageCard({
           ? t(
               'In simulation mode nothing is really sent. Switch to Test mode to send a real message.'
             )
-          : mode === 'DIALOG360_TEST'
-            ? '360dialog test mode requires three approved test numbers. Real sending is currently controlled by the Railway safety switch.'
-            : mode === 'META_TEST'
+          : mode === 'META_TEST' || mode === 'DIALOG360_TEST'
               ? t(
                   'In Test mode the number must be on the test allowlist below.'
                 )
@@ -990,8 +1069,6 @@ function PreferencesCard({
 
   const [allowlist, setAllowlist] = useState('');
   const [msg, setMsg] = useState('');
-
-  const is360 = data?.mode === 'DIALOG360_TEST';
 
   useEffect(() => {
     if (data) {
@@ -1071,13 +1148,6 @@ function PreferencesCard({
             </span>
           </div>
 
-          {is360 && (
-            <div className="muted text-xs mt-2">
-              Note: 360dialog uses DIALOG360_TEST_NUMBERS
-              from Railway. This dashboard allowlist
-              does not update that variable.
-            </div>
-          )}
         </div>
       </div>
 

@@ -5,6 +5,7 @@ import { env } from '../config/env.js';
 import { isTestAllowed } from '../services/testAllowlist.js';
 import {
   getWhatsAppConfig,
+  isDialog360,
   type WhatsAppConfig
 } from '../services/whatsappConfig.js';
 
@@ -77,52 +78,54 @@ const templateComponents = (variables: string[]) =>
       }]
     : [];
 
-// Keep real 360dialog sending disabled until explicitly enabled.
-function realSendingEnabled(): boolean {
-  return env.DIALOG360_SEND_ENABLED === true;
-}
+// Recipients allowed in 360dialog test mode: the dashboard allowlist plus DIALOG360_TEST_NUMBERS.
+async function allowed360TestRecipient(to: string): Promise<boolean> {
+  const phone = normalizePhone(to);
 
-function allowed360TestNumbers(): Set<string> {
-  return new Set(
-    env.DIALOG360_TEST_NUMBERS
-      .split(',')
-      .map(normalizePhone)
-      .filter(Boolean)
+  const fromEnv = env.DIALOG360_TEST_NUMBERS
+    .split(',')
+    .map(normalizePhone)
+    .filter(Boolean);
+
+  return (
+    fromEnv.includes(phone) ||
+    (await isTestAllowed(to)) ||
+    (await isTestAllowed(`+${phone}`))
   );
 }
 
 async function check360Safety(
   to: string
 ): Promise<SendResult | null> {
-  if (!realSendingEnabled()) {
-    return failure(
-      'SENDING_DISABLED',
-      'Real WhatsApp sending is disabled'
-    );
-  }
-
   const cfg = await getWhatsAppConfig();
 
-  if (cfg.mode !== 'DIALOG360_TEST') {
+  if (!isDialog360(cfg.mode)) {
     return failure(
       'MODE_BLOCKED',
-      '360dialog sending is restricted to test mode'
+      '360dialog is not the selected WhatsApp provider'
     );
   }
 
-  const numbers = allowed360TestNumbers();
-
   if (
-    numbers.size !== 3 ||
-    !numbers.has(normalizePhone(to))
+    cfg.mode === 'DIALOG360_TEST' &&
+    !(await allowed360TestRecipient(to))
   ) {
     return failure(
       'TEST_RECIPIENT_BLOCKED',
-      'Recipient is not in the approved test allowlist'
+      'Recipient is not on the test allowlist'
     );
   }
 
   return null;
+}
+
+/** Secret path segment that authenticates 360dialog webhook calls (360dialog does not sign them). */
+export function dialog360WebhookToken(): string {
+  return crypto
+    .createHmac('sha256', env.JWT_SECRET)
+    .update('dialog360-webhook')
+    .digest('hex')
+    .slice(0, 40);
 }
 
 export class MockWhatsAppProvider implements WhatsAppProvider {
@@ -164,14 +167,6 @@ export class MetaWhatsAppProvider implements WhatsAppProvider {
   async sendTemplateMessage(
     input: SendTemplateInput
   ): Promise<SendResult> {
-    // Block Meta sends while 360dialog integration is being prepared.
-    if (realSendingEnabled()) {
-      return failure(
-        'META_SENDING_BLOCKED',
-        'Meta sending is disabled during 360dialog integration'
-      );
-    }
-
     const current = await getWhatsAppConfig();
 
     if (
@@ -334,6 +329,19 @@ export class MetaWhatsAppProvider implements WhatsAppProvider {
 }
 
 export class Dialog360WhatsAppProvider implements WhatsAppProvider {
+  constructor(private cfg: WhatsAppConfig) {}
+
+  private url(path: string): string {
+    return `${env.DIALOG360_API_BASE_URL.replace(/\/$/, '')}${path}`;
+  }
+
+  private headers() {
+    return {
+      'D360-API-KEY': this.cfg.dialog360ApiKey,
+      'Content-Type': 'application/json'
+    };
+  }
+
   async sendTemplateMessage(
     input: SendTemplateInput
   ): Promise<SendResult> {
@@ -341,7 +349,7 @@ export class Dialog360WhatsAppProvider implements WhatsAppProvider {
 
     if (blocked) return blocked;
 
-    if (!env.DIALOG360_API_KEY) {
+    if (!this.cfg.dialog360ApiKey) {
       return failure(
         'CONFIG_MISSING',
         '360dialog API key is missing'
@@ -359,7 +367,7 @@ export class Dialog360WhatsAppProvider implements WhatsAppProvider {
 
     try {
       const response = await axios.post(
-        `${env.DIALOG360_API_BASE_URL.replace(/\/$/, '')}/messages`,
+        this.url('/messages'),
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -372,10 +380,7 @@ export class Dialog360WhatsAppProvider implements WhatsAppProvider {
           }
         },
         {
-          headers: {
-            'D360-API-KEY': env.DIALOG360_API_KEY,
-            'Content-Type': 'application/json'
-          },
+          headers: this.headers(),
           timeout: 15000
         }
       );
@@ -397,6 +402,7 @@ export class Dialog360WhatsAppProvider implements WhatsAppProvider {
       return failure(
         String(
           error.response?.data?.error?.code ??
+          error.response?.status ??
           'DIALOG360_ERROR'
         ),
         apiError(error)
@@ -404,32 +410,63 @@ export class Dialog360WhatsAppProvider implements WhatsAppProvider {
     }
   }
 
+  // Reading the account's templates proves the API key works.
   async validateConfiguration(): Promise<ValidationResult> {
-    if (!env.DIALOG360_API_KEY) {
+    if (!this.cfg.dialog360ApiKey) {
       return {
         ok: false,
         message: '360dialog API key is missing'
       };
     }
 
-    const numbers = allowed360TestNumbers();
+    try {
+      const templates = await this.listTemplates();
 
-    if (numbers.size !== 3) {
+      return {
+        ok: true,
+        message: `Connected to 360dialog. ${templates.length} template(s) found on the account.`
+      };
+    } catch (error: any) {
       return {
         ok: false,
-        message: 'Exactly three unique test numbers are required'
+        message: `360dialog connection failed: ${apiError(error)}`
       };
     }
-
-    return {
-      ok: true,
-      message: '360dialog configuration is present. Live connection not verified.'
-    };
   }
 
-  // Webhook verification will be implemented separately.
+  async listTemplates(): Promise<MetaTemplate[]> {
+    const response = await axios.get(
+      this.url('/v1/configs/templates'),
+      {
+        headers: this.headers(),
+        params: { limit: 1000 },
+        timeout: 15000
+      }
+    );
+
+    return (response.data?.waba_templates ?? []).map((x: any) => ({
+      name: String(x.name),
+      language: String(x.language),
+      status: String(x.status ?? '').toUpperCase(),
+      category: x.category ? String(x.category) : undefined
+    }));
+  }
+
+  /** Points 360dialog delivery receipts and replies at this app. */
+  async registerWebhook(url: string): Promise<void> {
+    await axios.post(
+      this.url('/v1/configs/webhook'),
+      { url },
+      {
+        headers: this.headers(),
+        timeout: 15000
+      }
+    );
+  }
+
+  // 360dialog webhooks are authenticated by the secret token in their URL instead.
   verifyWebhookSignature(): boolean {
-    return false;
+    return true;
   }
 }
 
@@ -440,8 +477,8 @@ export async function provider(): Promise<WhatsAppProvider> {
     return new MockWhatsAppProvider();
   }
 
-  if (cfg.mode === 'DIALOG360_TEST') {
-    return new Dialog360WhatsAppProvider();
+  if (isDialog360(cfg.mode)) {
+    return new Dialog360WhatsAppProvider(cfg);
   }
 
   if (
@@ -456,4 +493,8 @@ export async function provider(): Promise<WhatsAppProvider> {
 
 export async function metaProvider(): Promise<MetaWhatsAppProvider> {
   return new MetaWhatsAppProvider(await getWhatsAppConfig());
+}
+
+export async function dialog360Provider(): Promise<Dialog360WhatsAppProvider> {
+  return new Dialog360WhatsAppProvider(await getWhatsAppConfig());
 }

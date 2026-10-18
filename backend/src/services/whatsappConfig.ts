@@ -7,7 +7,11 @@ export type WhatsAppMode =
   | 'MOCK'
   | 'META_TEST'
   | 'META_PRODUCTION'
-  | 'DIALOG360_TEST';
+  | 'DIALOG360_TEST'
+  | 'DIALOG360_PRODUCTION';
+
+export const isDialog360 = (mode: WhatsAppMode) =>
+  mode === 'DIALOG360_TEST' || mode === 'DIALOG360_PRODUCTION';
 
 export type WhatsAppConfig = {
   mode: WhatsAppMode;
@@ -17,6 +21,7 @@ export type WhatsAppConfig = {
   accessToken: string;
   appSecret: string;
   webhookVerifyToken: string;
+  dialog360ApiKey: string;
 };
 
 type PlainField =
@@ -27,7 +32,8 @@ type PlainField =
 type SecretField =
   | 'accessToken'
   | 'appSecret'
-  | 'webhookVerifyToken';
+  | 'webhookVerifyToken'
+  | 'dialog360ApiKey';
 
 export const PLAIN_FIELDS: PlainField[] = [
   'graphApiVersion',
@@ -38,7 +44,8 @@ export const PLAIN_FIELDS: PlainField[] = [
 export const SECRET_FIELDS: SecretField[] = [
   'accessToken',
   'appSecret',
-  'webhookVerifyToken'
+  'webhookVerifyToken',
+  'dialog360ApiKey'
 ];
 
 type Stored = {
@@ -56,7 +63,8 @@ const fromEnv = (): WhatsAppConfig => ({
   wabaId: env.META_WABA_ID,
   accessToken: env.META_ACCESS_TOKEN,
   appSecret: env.META_APP_SECRET,
-  webhookVerifyToken: env.META_WEBHOOK_VERIFY_TOKEN
+  webhookVerifyToken: env.META_WEBHOOK_VERIFY_TOKEN,
+  dialog360ApiKey: env.DIALOG360_API_KEY
 });
 
 // Cache dashboard settings for 30 seconds

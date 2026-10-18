@@ -6,6 +6,8 @@ import { requireAuth, allow } from '../middleware/auth.js';
 import { getTestAllowlist } from '../services/testAllowlist.js';
 import { normalizePhone } from '../utils/phone.js';
 import {
+  dialog360Provider,
+  dialog360WebhookToken,
   metaProvider,
   provider
 } from '../providers/whatsapp.js';
@@ -14,6 +16,7 @@ import { runtimeSettings } from '../services/runtimeSettings.js';
 import {
   describeWhatsAppConfig,
   getWhatsAppConfig,
+  isDialog360,
   resetWhatsAppConfig,
   saveWhatsAppConfig,
   PLAIN_FIELDS,
@@ -33,7 +36,7 @@ const setting = async (key: string) =>
 
 function providerName(mode: string): string {
   if (mode === 'MOCK') return 'Mock';
-  if (mode === 'DIALOG360_TEST') return '360dialog WhatsApp API';
+  if (mode === 'DIALOG360_TEST' || mode === 'DIALOG360_PRODUCTION') return '360dialog WhatsApp API';
   return 'Meta WhatsApp Cloud API';
 }
 
@@ -49,8 +52,8 @@ r.get('/whatsapp', async (req, res) => {
     businessDisplayName:
       (await setting('BUSINESS_DISPLAY_NAME')) ?? 'Tareq',
     webhookConfigured:
-      cfg.mode === 'DIALOG360_TEST'
-        ? false
+      isDialog360(cfg.mode)
+        ? Boolean(await setting('DIALOG360_WEBHOOK_REGISTERED'))
         : Boolean(cfg.webhookVerifyToken && cfg.appSecret),
     testAllowedNumbers: [
       ...(await getTestAllowlist())
@@ -92,6 +95,7 @@ const connectionSchema = z.object({
   accessToken: z.string().trim().max(1000).optional(),
   appSecret: z.string().trim().max(200).optional(),
   webhookVerifyToken: z.string().trim().max(200).optional(),
+  dialog360ApiKey: z.string().trim().max(500).optional(),
 
   clear: z.array(
     z.enum([
@@ -199,21 +203,18 @@ r.get(
   async (_req, res) => {
     const cfg = await getWhatsAppConfig();
 
-    if (cfg.mode === 'DIALOG360_TEST') {
-      return res.status(400).json({
-        error:
-          '360dialog template synchronization is not configured yet. Verify approved templates in 360dialog Manager.'
-      });
-    }
+    const via360 = isDialog360(cfg.mode);
 
     let remote;
 
     try {
-      remote = await (await metaProvider()).listTemplates();
+      remote = via360
+        ? await (await dialog360Provider()).listTemplates()
+        : await (await metaProvider()).listTemplates();
     } catch (e: any) {
       return res.status(400).json({
         error:
-          `Could not read templates from Meta: ${
+          `Could not read templates from ${via360 ? '360dialog' : 'Meta'}: ${
             String(
               e?.response?.data?.error?.message ??
               e?.message
@@ -318,12 +319,67 @@ r.put(
   }
 );
 
+// Points 360dialog delivery receipts and replies at this app's public address.
+r.post(
+  '/whatsapp/dialog360/webhook',
+  allow('SUPER_ADMIN'),
+  async (req, res) => {
+    const proto = String(req.header('x-forwarded-proto') ?? req.protocol).split(',')[0];
+    const url = `${proto}://${req.get('host')}/api/webhooks/360dialog/${dialog360WebhookToken()}`;
+
+    if (proto !== 'https') {
+      return res.status(400).json({
+        error: '360dialog can only reach a public HTTPS address. Open the dashboard on its https:// address and try again.'
+      });
+    }
+
+    try {
+      await (await dialog360Provider()).registerWebhook(url);
+    } catch (e: any) {
+      return res.status(400).json({
+        error: `360dialog rejected the webhook: ${String(e?.response?.data?.meta?.developer_message ?? e?.response?.data?.error?.message ?? e?.message).slice(0, 300)}`
+      });
+    }
+
+    await prisma.systemSetting.upsert({
+      where: { key: 'DIALOG360_WEBHOOK_REGISTERED' },
+      create: { key: 'DIALOG360_WEBHOOK_REGISTERED', value: new Date().toISOString() },
+      update: { value: new Date().toISOString() }
+    });
+
+    await audit(
+      req.user,
+      'SETTINGS_CHANGED',
+      'SystemSetting',
+      'DIALOG360_WEBHOOK_REGISTERED',
+      undefined,
+      req.ip
+    );
+
+    res.json({ ok: true });
+  }
+);
+
 async function checklist() {
   const cfg = await getWhatsAppConfig();
 
   const templates = await prisma.messageTemplate.count({
     where: { isActive: true }
   });
+
+  if (isDialog360(cfg.mode)) {
+    return {
+      credentials: Boolean(cfg.dialog360ApiKey),
+      templates: templates >= 2,
+      webhook: Boolean(await setting('DIALOG360_WEBHOOK_REGISTERED')),
+      timezone:
+        (await runtimeSettings()).timezone === 'Asia/Dubai',
+      testPassed:
+        (await setting('LAST_TEST_PASSED')) === true,
+      backupConfigured:
+        (await setting('DATABASE_BACKUP_CONFIGURED')) === true
+    };
+  }
 
   return {
     credentials: Boolean(cfg.accessToken),
@@ -373,8 +429,11 @@ r.post(
       });
     }
 
-    const check =
-      await (await metaProvider()).validateConfiguration();
+    const via360 = isDialog360((await getWhatsAppConfig()).mode);
+
+    const check = via360
+      ? await (await dialog360Provider()).validateConfiguration()
+      : await (await metaProvider()).validateConfiguration();
 
     if (!check.ok) {
       return res.status(400).json({
@@ -383,7 +442,7 @@ r.post(
     }
 
     await saveWhatsAppConfig({
-      mode: 'META_PRODUCTION'
+      mode: via360 ? 'DIALOG360_PRODUCTION' : 'META_PRODUCTION'
     });
 
     await prisma.systemSetting.upsert({

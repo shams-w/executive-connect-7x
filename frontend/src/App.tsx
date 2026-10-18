@@ -130,7 +130,7 @@ function ModeBanner() {
     staleTime: 300_000
   });
 
-  if (!data || data.mode === 'META_PRODUCTION') {
+  if (!data || data.mode === 'META_PRODUCTION' || data.mode === 'DIALOG360_PRODUCTION') {
     return null;
   }
 
@@ -146,7 +146,7 @@ function ModeBanner() {
       'Meta test mode only sends to approved test numbers.';
   } else if (mode === 'DIALOG360_TEST') {
     message =
-      '360dialog test mode is restricted to three approved test numbers. Real sending is controlled by the Railway safety switch.';
+      '360dialog test mode only sends to approved test numbers.';
   } else {
     message =
       `WhatsApp is running in ${String(mode)} mode.`;
