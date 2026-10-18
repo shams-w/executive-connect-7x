@@ -1,0 +1,68 @@
+name: Production setup
+
+# Manual only: Actions > Production setup > Run workflow.
+# Needs repository secrets DASHBOARD_USERNAME and DASHBOARD_PASSWORD (a Super Admin sign-in).
+# Results are written as annotations on the run, never the secrets themselves.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "status = read only; automatic = set Send Policy to Automatic; activate = Automatic + production activation"
+        type: choice
+        options: [status, automatic, activate]
+        default: status
+      url:
+        description: Dashboard address
+        default: https://executive-connect-7x-production.up.railway.app
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    env:
+      ACTION: ${{ inputs.action }}
+      BASE: ${{ inputs.url }}
+      DASHBOARD_USERNAME: ${{ secrets.DASHBOARD_USERNAME }}
+      DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+    steps:
+      - name: Check and configure
+        run: |
+          set -euo pipefail
+          [ -n "$DASHBOARD_USERNAME" ] && [ -n "$DASHBOARD_PASSWORD" ] || { echo "::error::Add DASHBOARD_USERNAME and DASHBOARD_PASSWORD repository secrets first"; exit 1; }
+          API="${BASE%/}/api"
+
+          LOGIN=$(jq -n --arg u "$DASHBOARD_USERNAME" --arg p "$DASHBOARD_PASSWORD" '{username:$u,password:$p}' \
+            | curl -sS "$API/auth/login" -H 'Content-Type: application/json' -d @-)
+          TOKEN=$(echo "$LOGIN" | jq -r '.accessToken // empty')
+          [ -n "$TOKEN" ] || { echo "::error::Sign-in failed: $(echo "$LOGIN" | jq -r '.error // "no response"')"; exit 1; }
+          echo "::add-mask::$TOKEN"
+          [ "$(echo "$LOGIN" | jq -r .user.role)" = SUPER_ADMIN ] || { echo "::error::This account is not a Super Admin"; exit 1; }
+          [ "$(echo "$LOGIN" | jq -r .user.mustChangePassword)" != true ] || { echo "::error::This account must change its password in the dashboard first"; exit 1; }
+
+          call() { curl -sS "$API$2" -X "$1" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
+
+          if [ "$ACTION" != status ]; then
+            OUT=$(call PUT /admin-settings '{"sendPolicy":"AUTO"}')
+            echo "::notice title=Send policy::$(echo "$OUT" | jq -r '.settings.sendPolicy // .error')"
+          fi
+
+          SETTINGS=$(call GET /admin-settings)
+          WA=$(call GET /settings/whatsapp)
+          CHECK=$(call GET /settings/production-checklist)
+          TEMPLATES=$(call GET /templates)
+          ALERTS=$(call GET /dashboard/alerts)
+
+          echo "::notice title=Settings::$(echo "$SETTINGS" | jq -c '{sendPolicy,dailySendTime,timezone,minimumImportAgeMinutes}')"
+          echo "::notice title=WhatsApp::$(echo "$WA" | jq -c '{mode,provider,productionActivated,webhookConfigured,testAllowlist:(.testAllowedNumbers|length)}')"
+          echo "::notice title=Checklist::$(echo "$CHECK" | jq -c .)"
+          echo "::notice title=Templates::$(echo "$TEMPLATES" | jq -c '[.[]? | {n:.internalName,meta:.metaTemplateName,lang:.metaTemplateLanguage,active:.isActive}]')"
+          echo "::notice title=Alerts::$(echo "$ALERTS" | jq -c '{failedLast7, lastAlert: (.lastAlert | if . then {kind, title} else null end)}')"
+
+          if [ "$ACTION" = activate ]; then
+            OUT=$(call POST /settings/activate-production '{"confirmation":"ACTIVATE PRODUCTION"}')
+            if [ "$(echo "$OUT" | jq -r '.ok // false')" = true ]; then
+              echo "::notice title=Production::$(echo "$OUT" | jq -r .note)"
+            else
+              echo "::error title=Production not activated::$(echo "$OUT" | jq -r '.error // .')"
+              exit 1
+            fi
+          fi
