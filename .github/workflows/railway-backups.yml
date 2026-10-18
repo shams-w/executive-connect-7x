@@ -1,0 +1,73 @@
+name: Railway database backups
+
+# Manual only: Actions > Railway database backups > Run workflow.
+# Uses the RAILWAY_TOKEN repository secret. Results are written as run annotations.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "status = read only; enable = turn on daily + weekly backups of the database volume"
+        type: choice
+        options: [status, enable]
+        default: status
+      project:
+        description: Railway project name
+        default: amiable-insight
+      environment:
+        description: Railway environment name
+        default: production
+
+jobs:
+  backups:
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      ACTION: ${{ inputs.action }}
+      PROJECT: ${{ inputs.project }}
+      ENVIRONMENT: ${{ inputs.environment }}
+    steps:
+      - name: Run
+        run: |
+          set -euo pipefail
+          [ -n "$RAILWAY_TOKEN" ] || { echo "::error::Add the RAILWAY_TOKEN repository secret first"; exit 1; }
+          API=https://backboard.railway.com/graphql/v2
+
+          gql() { # $1 = query, $2 = variables JSON (optional)
+            local vars=${2:-}
+            [ -n "$vars" ] || vars='{}'
+            curl -sS "$API" -H "$AUTH" -H 'Content-Type: application/json' \
+              -d "$(jq -n --arg q "$1" --argjson v "$vars" '{query:$q,variables:$v}')"
+          }
+
+          FIELDS='id name environments { edges { node { id name } } } services { edges { node { id name } } } volumes { edges { node { id name volumeInstances { edges { node { id serviceId environmentId mountPath } } } } } }'
+
+          # Account/workspace token first, then project token.
+          AUTH="Authorization: Bearer $RAILWAY_TOKEN"
+          P=$(gql "{ projects { edges { node { $FIELDS } } } }" | jq -c --arg p "$PROJECT" '.data.projects.edges[]?.node | select(.name==$p)' | head -1)
+          if [ -z "$P" ]; then
+            AUTH="Project-Access-Token: $RAILWAY_TOKEN"
+            PID=$(gql '{ projectToken { projectId } }' | jq -r '.data.projectToken.projectId // empty')
+            [ -n "$PID" ] || { echo "::error::Token rejected or project '$PROJECT' not found"; exit 1; }
+            P=$(gql "query(\$id:String!){ project(id:\$id){ $FIELDS } }" "{\"id\":\"$PID\"}" | jq -c '.data.project')
+          fi
+          ENV_ID=$(echo "$P" | jq -r --arg e "$ENVIRONMENT" '.environments.edges[].node | select(.name==$e) | .id')
+
+          echo "::notice title=Services::$(echo "$P" | jq -r '[.services.edges[].node.name] | join(", ")')"
+          echo "::notice title=Volumes::$(echo "$P" | jq -c --arg e "$ENV_ID" '. as $p | [.volumes.edges[].node | {name, mounts: [.volumeInstances.edges[].node | select(.environmentId==$e) | {service: (.serviceId as $s | [$p.services.edges[].node | select(.id==$s) | .name][0]), mountPath}]}]')"
+
+          # The database volume: mounted at a postgres data path, otherwise the only volume.
+          VI=$(echo "$P" | jq -r --arg e "$ENV_ID" '[.volumes.edges[].node.volumeInstances.edges[].node | select(.environmentId==$e)] | (map(select(.mountPath|test("postgres";"i"))) + .) | .[0].id // empty')
+          [ -n "$VI" ] || { echo "::error title=Backups::No database volume found in project '$PROJECT'"; exit 1; }
+
+          schedule() { gql 'query($id:String!){ volumeInstanceBackupScheduleList(volumeInstanceId:$id){ name kind cron retentionSeconds } }' "{\"id\":\"$VI\"}"; }
+          echo "::notice title=Backup schedule before::$(schedule | jq -c '.data.volumeInstanceBackupScheduleList // .errors')"
+
+          if [ "$ACTION" = enable ]; then
+            OUT=$(gql 'mutation($id:String!){ volumeInstanceBackupScheduleUpdate(volumeInstanceId:$id, kinds:[DAILY, WEEKLY]) }' "{\"id\":\"$VI\"}")
+            if [ "$(echo "$OUT" | jq -r '.data.volumeInstanceBackupScheduleUpdate // false')" = true ]; then
+              echo "::notice title=Backups enabled::$(schedule | jq -c '.data.volumeInstanceBackupScheduleList')"
+            else
+              echo "::error title=Backups not enabled::$(echo "$OUT" | jq -c '.errors // .' | head -c 500)"
+              exit 1
+            fi
+          fi
