@@ -1,0 +1,75 @@
+name: Deploy to Railway
+
+# Manual only: Actions > Deploy to Railway > Run workflow.
+# Needs a repository secret RAILWAY_TOKEN (a Railway account/workspace token or a project token).
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: Railway project name
+        default: amiable-insight
+      service:
+        description: Railway service name
+        default: executive-connect-7x
+      environment:
+        description: Railway environment name
+        default: production
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      PROJECT: ${{ inputs.project }}
+      SERVICE: ${{ inputs.service }}
+      ENVIRONMENT: ${{ inputs.environment }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - name: Deploy latest commit and wait for the result
+        run: |
+          set -euo pipefail
+          [ -n "$RAILWAY_TOKEN" ] || { echo "::error::Add the RAILWAY_TOKEN repository secret first"; exit 1; }
+          API=https://backboard.railway.com/graphql/v2
+
+          gql() { # $1 = auth header, $2 = query, $3 = variables JSON (optional)
+            local vars=${3:-}
+            [ -n "$vars" ] || vars='{}'
+            curl -sS "$API" -H "$1" -H 'Content-Type: application/json' \
+              -d "$(jq -n --arg q "$2" --argjson v "$vars" '{query:$q,variables:$v}')"
+          }
+
+          FIELDS='id name environments { edges { node { id name } } } services { edges { node { id name } } }'
+
+          # Account/workspace token first, then project token.
+          AUTH="Authorization: Bearer $RAILWAY_TOKEN"
+          OUT=$(gql "$AUTH" "{ projects { edges { node { $FIELDS } } } }")
+          PROJECT_JSON=$(echo "$OUT" | jq -c --arg p "$PROJECT" '.data.projects.edges[]?.node | select(.name==$p)' | head -1)
+          if [ -z "$PROJECT_JSON" ]; then
+            AUTH="Project-Access-Token: $RAILWAY_TOKEN"
+            PID=$(gql "$AUTH" '{ projectToken { projectId } }' | jq -r '.data.projectToken.projectId // empty')
+            [ -n "$PID" ] || { echo "::error::Token rejected or project '$PROJECT' not found"; echo "$OUT"; exit 1; }
+            PROJECT_JSON=$(gql "$AUTH" "query(\$id:String!){ project(id:\$id){ $FIELDS } }" "{\"id\":\"$PID\"}" | jq -c '.data.project')
+          fi
+
+          SERVICE_ID=$(echo "$PROJECT_JSON" | jq -r --arg s "$SERVICE" '.services.edges[].node | select(.name==$s) | .id')
+          ENV_ID=$(echo "$PROJECT_JSON" | jq -r --arg e "$ENVIRONMENT" '.environments.edges[].node | select(.name==$e) | .id')
+          echo "Project: $(echo "$PROJECT_JSON" | jq -r .name)"
+          echo "Services: $(echo "$PROJECT_JSON" | jq -r '[.services.edges[].node.name] | join(", ")')"
+          [ -n "$SERVICE_ID" ] && [ -n "$ENV_ID" ] || { echo "::error::Service '$SERVICE' or environment '$ENVIRONMENT' not found"; exit 1; }
+
+          OUT=$(gql "$AUTH" 'mutation($s:String!,$e:String!,$c:String!){ serviceInstanceDeployV2(serviceId:$s, environmentId:$e, commitSha:$c) }' \
+            "{\"s\":\"$SERVICE_ID\",\"e\":\"$ENV_ID\",\"c\":\"$COMMIT\"}")
+          DEPLOYMENT_ID=$(echo "$OUT" | jq -r '.data.serviceInstanceDeployV2 // empty')
+          [ -n "$DEPLOYMENT_ID" ] || { echo "::error::Deploy request failed"; echo "$OUT"; exit 1; }
+          echo "Deploying commit $COMMIT as deployment $DEPLOYMENT_ID"
+
+          for i in $(seq 1 90); do
+            STATUS=$(gql "$AUTH" 'query($id:String!){ deployment(id:$id){ status } }' "{\"id\":\"$DEPLOYMENT_ID\"}" | jq -r '.data.deployment.status')
+            echo "Status: $STATUS"
+            case "$STATUS" in
+              SUCCESS) exit 0 ;;
+              FAILED|CRASHED|REMOVED) echo "::error::Deployment $STATUS"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Timed out waiting for the deployment"; exit 1
