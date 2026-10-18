@@ -319,6 +319,84 @@ r.put(
   }
 );
 
+const EXAMPLE_VALUES: Record<string, string> = {
+  firstName: 'Ahmed',
+  lastName: 'Hassan',
+  fullName: 'Ahmed Hassan',
+  yearsOfService: '5'
+};
+
+// Submits active templates that are missing on the 360dialog account, using the wording stored in the app.
+r.post(
+  '/whatsapp/dialog360/templates/submit',
+  allow('SUPER_ADMIN', 'COMMUNICATIONS_ADMIN'),
+  async (req, res) => {
+    const d360 = await dialog360Provider();
+
+    let remote;
+
+    try {
+      remote = await d360.listTemplates();
+    } catch (e: any) {
+      return res.status(400).json({
+        error: `Could not read templates from 360dialog: ${String(e?.response?.data?.meta?.developer_message ?? e?.message).slice(0, 300)}`
+      });
+    }
+
+    const local = await prisma.messageTemplate.findMany({
+      where: { isActive: true },
+      orderBy: { internalName: 'asc' }
+    });
+
+    const results = [];
+
+    for (const t of local) {
+      const exists = remote.some(
+        x => x.name === t.metaTemplateName && x.language === t.metaTemplateLanguage
+      );
+
+      if (exists) continue;
+
+      if (!t.bodyText) {
+        results.push({ template: t.metaTemplateName, language: t.metaTemplateLanguage, ok: false, message: 'No message text saved in the app for this template' });
+        continue;
+      }
+
+      const names = Array.isArray(t.variables) ? (t.variables as unknown[]).map(String) : [];
+
+      try {
+        const status = await d360.createTemplate({
+          name: t.metaTemplateName,
+          language: t.metaTemplateLanguage,
+          category: t.metaCategory || 'UTILITY',
+          bodyText: t.bodyText,
+          examples: names.map(n => EXAMPLE_VALUES[n] ?? 'Ahmed')
+        });
+
+        results.push({ template: t.metaTemplateName, language: t.metaTemplateLanguage, ok: true, message: status });
+      } catch (e: any) {
+        results.push({
+          template: t.metaTemplateName,
+          language: t.metaTemplateLanguage,
+          ok: false,
+          message: String(e?.response?.data?.meta?.developer_message ?? e?.response?.data?.error?.message ?? e?.message).slice(0, 300)
+        });
+      }
+    }
+
+    await audit(
+      req.user,
+      'TEMPLATES_SUBMITTED',
+      'MessageTemplate',
+      undefined,
+      { submitted: results.filter(x => x.ok).map(x => `${x.template}/${x.language}`) },
+      req.ip
+    );
+
+    res.json(results);
+  }
+);
+
 // Points 360dialog delivery receipts and replies at this app's public address.
 r.post(
   '/whatsapp/dialog360/webhook',

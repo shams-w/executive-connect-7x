@@ -452,6 +452,37 @@ export class Dialog360WhatsAppProvider implements WhatsAppProvider {
     }));
   }
 
+  /** Submits a template to the WhatsApp Business account for approval. */
+  async createTemplate(input: {
+    name: string;
+    language: string;
+    category: string;
+    bodyText: string;
+    examples: string[];
+  }): Promise<string> {
+    const response = await axios.post(
+      this.url('/v1/configs/templates'),
+      {
+        name: input.name,
+        language: input.language,
+        category: input.category,
+        components: [{
+          type: 'BODY',
+          text: input.bodyText,
+          ...(input.examples.length
+            ? { example: { body_text: [input.examples] } }
+            : {})
+        }]
+      },
+      {
+        headers: this.headers(),
+        timeout: 15000
+      }
+    );
+
+    return String(response.data?.status ?? 'submitted').toUpperCase();
+  }
+
   /** Points 360dialog delivery receipts and replies at this app. */
   async registerWebhook(url: string): Promise<void> {
     await axios.post(

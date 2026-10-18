@@ -792,6 +792,24 @@ function TemplateCheckCard({
   const [busy, setBusy] = useState(false);
 
   const is360 = is360Mode(mode);
+  const [submitted, setSubmitted] = useState<any[] | null>(null);
+
+  async function submitMissing() {
+    setBusy(true);
+    setErr('');
+
+    try {
+      const response = await api.post(
+        '/settings/whatsapp/dialog360/templates/submit'
+      );
+
+      setSubmitted(response.data);
+      await run();
+    } catch (e: any) {
+      setErr(apiError(t, e, 'Submit failed'));
+      setBusy(false);
+    }
+  }
 
   async function run() {
     setBusy(true);
@@ -830,22 +848,57 @@ function TemplateCheckCard({
           </p>
         </div>
 
-        <button
-          className="btn whitespace-nowrap"
-          disabled={busy}
-          onClick={run}
-        >
-          {busy
-            ? t('Checking…')
-            : is360
-              ? t('Check templates with 360dialog')
-              : t('Check templates with Meta')}
-        </button>
+        <div className="flex flex-col gap-2 items-end">
+          <button
+            className="btn whitespace-nowrap"
+            disabled={busy}
+            onClick={run}
+          >
+            {busy
+              ? t('Checking…')
+              : is360
+                ? t('Check templates with 360dialog')
+                : t('Check templates with Meta')}
+          </button>
+
+          {is360 && rows?.some(r => r.status === 'NOT_FOUND') && (
+            <button
+              className="btn btn-primary whitespace-nowrap"
+              disabled={busy}
+              onClick={submitMissing}
+            >
+              {t('Submit missing templates to 360dialog')}
+            </button>
+          )}
+        </div>
       </div>
 
       {err && (
         <div className="mt-4 rounded-lg bg-red-50 text-red-700 text-sm px-3 py-2">
           {err}
+        </div>
+      )}
+
+      {submitted && (
+        <div className="mt-4 rounded-lg border p-3 text-sm">
+          <b>{t('Submitted for approval')}</b>
+
+          {submitted.length === 0 && (
+            <div className="muted mt-1">{t('Nothing was missing.')}</div>
+          )}
+
+          {submitted.map(x => (
+            <div
+              key={`${x.template}-${x.language}`}
+              className={`mt-1 ${x.ok ? 'text-green-700' : 'text-red-700'}`}
+            >
+              <span dir="ltr">{x.template} ({x.language})</span>: {x.message}
+            </div>
+          ))}
+
+          <div className="muted text-xs mt-2">
+            {t('WhatsApp usually reviews new templates within minutes to a few hours. Check again later; messages using a template send once it shows Approved.')}
+          </div>
         </div>
       )}
 
