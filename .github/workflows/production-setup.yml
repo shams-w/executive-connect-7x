@@ -56,6 +56,10 @@ jobs:
           echo "::notice title=Checklist::$(echo "$CHECK" | jq -c .)"
           echo "::notice title=Templates::$(echo "$TEMPLATES" | jq -c '[.[]? | {n:.internalName,meta:.metaTemplateName,lang:.metaTemplateLanguage,active:.isActive}]')"
           echo "::notice title=Alerts::$(echo "$ALERTS" | jq -c '{failedLast7, lastAlert: (.lastAlert | if . then {kind, title} else null end)}')"
+          echo "::notice title=Template approval::$(call GET /settings/whatsapp/templates-check | jq -c 'if type=="array" then [.[] | {t:.metaTemplateName,lang:.language,status}] else . end')"
+          # Recent failures without names or numbers (run logs of a public repository are public).
+          echo "::notice title=Recent failures::$(call GET '/messages?status=FAILED' | jq -c '[.[:10][] | {at:(.failedAt // .updatedAt), template:.templateName, code:.failureCode, reason:.failureReason}]')"
+          echo "::notice title=Recent deliveries::$(call GET /messages | jq -c '[.[:50][] | .status] | group_by(.) | map({(.[0]): length}) | add // {}')"
 
           if [ "$ACTION" = activate ]; then
             OUT=$(call POST /settings/activate-production '{"confirmation":"ACTIVATE PRODUCTION"}')
