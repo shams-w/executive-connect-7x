@@ -63,6 +63,10 @@ const failure = (
 const apiError = (error: any): string =>
   String(
     error?.response?.data?.error?.message ??
+    // 360dialog explains rejections (e.g. 429) in these fields instead.
+    error?.response?.data?.meta?.developer_message ??
+    error?.response?.data?.errors?.[0]?.details ??
+    error?.response?.data?.errors?.[0]?.title ??
     error?.message ??
     'WhatsApp API request failed'
   ).slice(0, 500);
@@ -402,6 +406,7 @@ export class Dialog360WhatsAppProvider implements WhatsAppProvider {
       return failure(
         String(
           error.response?.data?.error?.code ??
+          error.response?.data?.errors?.[0]?.code ??
           error.response?.status ??
           'DIALOG360_ERROR'
         ),
