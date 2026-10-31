@@ -14,10 +14,19 @@ import { DAY_MS, todayInZone } from '../utils/date.js';
 
 const TOKEN_ERRORS = new Set(['190', '102', '463', '467']);
 
-const TRANSIENT_ERRORS = new Set([
-  '429', '500', '502', '503', '504',
-  '130429', '131048', '131056'
+// Retrying these cannot help until someone fixes the cause (token,
+// template, parameters or number).
+const PERMANENT_ERRORS = new Set([
+  ...TOKEN_ERRORS,
+  '100', '131008', '131009', '131030', '131051',
+  '132000', '132001', '132005', '132007', '132012', '132015', '132016',
+  'INVALID_PHONE', 'INVALID_TEMPLATE', 'CONFIG_MISSING'
 ]);
+
+const AUTO_RETRIES = 3;
+const AUTO_RETRY_DELAY_MS = 15 * 60000;
+
+const RATE_LIMIT_ERRORS = new Set(['429', '130429', '131048', '131056']);
 
 export async function createEligibleEvents(
   now = new Date(),
@@ -316,32 +325,95 @@ export async function processQueue() {
       continue;
     }
 
-    const tpl = await prisma.messageTemplate.findFirst({
+    // The queued template may have been deactivated since; pick the current one instead.
+    let tpl = await prisma.messageTemplate.findFirst({
       where: {
         metaTemplateName: d.templateName,
         isActive: true
       }
-    });
-
-    if (!tpl) continue;
-
-    const vars = templateVariables(
-      tpl.variables,
+    }) ?? await selectTemplate(
       d.celebrationEvent.eventType,
-      {
-        firstName: employee.firstName,
-        lastName: employee.lastName,
-        fullName: employee.fullName,
-        yearsOfService: d.celebrationEvent.yearsOfService
-      }
+      employee.preferredLanguage,
+      d.celebrationEvent.yearsOfService
     );
 
-    const result = await p.sendTemplateMessage({
+    if (!tpl) {
+      await prisma.messageDelivery.update({
+        where: { id: d.id },
+        data: {
+          status: 'FAILED',
+          failedAt: new Date(),
+          failureCode: 'NO_ACTIVE_TEMPLATE',
+          failureReason: `No active ${d.celebrationEvent.eventType} template`
+        }
+      });
+
+      failed++;
+      continue;
+    }
+
+    const send = (t: NonNullable<typeof tpl>) => p.sendTemplateMessage({
       to: employee.mobile,
-      templateName: tpl.metaTemplateName,
-      language: tpl.metaTemplateLanguage,
-      variables: vars
+      templateName: t.metaTemplateName,
+      language: t.metaTemplateLanguage,
+      variables: templateVariables(
+        t.variables,
+        d.celebrationEvent.eventType,
+        {
+          firstName: employee.firstName,
+          lastName: employee.lastName,
+          fullName: employee.fullName,
+          yearsOfService: d.celebrationEvent.yearsOfService
+        }
+      )
     });
+
+    let result = await send(tpl);
+
+    // 132001: this name/language is not approved on the WhatsApp account.
+    // Try the other active templates for the same celebration type.
+    if (String(result.errorCode ?? '') === '132001') {
+      const others = await prisma.messageTemplate.findMany({
+        where: {
+          eventType: d.celebrationEvent.eventType,
+          isActive: true,
+          id: { not: tpl.id }
+        },
+        orderBy: { internalName: 'asc' }
+      });
+
+      for (const alt of others) {
+        const retry = await send(alt);
+        if (String(retry.errorCode ?? '') === '132001') continue;
+        tpl = alt;
+        result = retry;
+        break;
+      }
+    }
+
+    if (tpl.metaTemplateName !== d.templateName) {
+      await prisma.messageDelivery.update({
+        where: { id: d.id },
+        data: { templateName: tpl.metaTemplateName }
+      });
+    }
+
+    // Rate limited: put it back in the queue and stop this batch, since
+    // every further request would be rejected too.
+    if (RATE_LIMIT_ERRORS.has(String(result.errorCode ?? '')) && d.retryCount < 8) {
+      await prisma.messageDelivery.update({
+        where: { id: d.id },
+        data: {
+          status: 'QUEUED',
+          failureCode: result.errorCode,
+          failureReason: result.errorReason,
+          retryCount: { increment: 1 },
+          nextAttemptAt: new Date(Date.now() + Math.min(2 ** d.retryCount, 30) * 60000)
+        }
+      });
+
+      break;
+    }
 
     if (result.status === 'SENT') {
       await prisma.messageDelivery.update({
@@ -385,17 +457,16 @@ export async function processQueue() {
         tokenProblem = true;
       }
 
-      const transient = TRANSIENT_ERRORS.has(
+      // Anything that is not a permanent error is retried automatically,
+      // 15 minutes apart, up to 3 times.
+      const permanent = PERMANENT_ERRORS.has(
         String(result.errorCode ?? '')
       );
 
       const nextRetry = d.retryCount + 1;
 
-      if (transient && nextRetry <= 3) {
-        const backoffMs = Math.pow(
-          2,
-          nextRetry - 1
-        ) * 60000;
+      if (!permanent && nextRetry <= AUTO_RETRIES) {
+        const backoffMs = AUTO_RETRY_DELAY_MS;
 
         await prisma.messageDelivery.update({
           where: { id: d.id },

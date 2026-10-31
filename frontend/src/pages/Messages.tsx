@@ -3,12 +3,14 @@ export default function Messages(){
   const {t,fmtDate,fmtDateTime}=useI18n();const loc=useLocation(),qc=useQueryClient();const me=qc.getQueryData<Me>(['me']);const canAct=me?.role==='SUPER_ADMIN'||me?.role==='COMMUNICATIONS_ADMIN';
   const status=loc.pathname.includes('failed')?'FAILED':loc.pathname.includes('pending')?'QUEUED':undefined;
   const {data=[]}=useQuery({queryKey:['messages',status],queryFn:()=>api.get('/messages',{params:{status}}).then(r=>r.data)});
-  const [msg,setMsg]=useState('');
+  const [msg,setMsg]=useState('');const [info,setInfo]=useState('');
+  async function retryAll(){setMsg('');setInfo('');try{const {data:out}=await api.post('/messages/retry-failed-today');setInfo(t('{n} message(s) queued to send again.').replace('{n}',String(out.count)));qc.invalidateQueries({queryKey:['messages']});qc.invalidateQueries({queryKey:['alerts']});}catch(e:any){setMsg(apiError(t,e,'Something went wrong'))}}
   async function act(path:string){setMsg('');try{await api.post(path);qc.invalidateQueries({queryKey:['messages']});qc.invalidateQueries({queryKey:['alerts']});}catch(e:any){setMsg(apiError(t,e,'Something went wrong'))}}
   const title=status==='FAILED'?'Failed Messages':status==='QUEUED'?'Scheduled Messages':'Delivery History';
-  const subtitle=status==='FAILED'?'Messages WhatsApp could not deliver. Fix the cause (e.g. a wrong number), then retry the same day.':status==='QUEUED'?'Messages waiting to be sent today.':'Every celebration message and its delivery status.';
+  const subtitle=status==='FAILED'?'Messages WhatsApp could not deliver. Temporary errors are retried automatically every 15 minutes, up to 3 times. Fix any other cause (e.g. a wrong number), then retry the same day.':status==='QUEUED'?'Messages waiting to be sent today.':'Every celebration message and its delivery status.';
   return <>
-    <h1 className="text-2xl font-bold">{t(title)}</h1><p className="muted mt-1 mb-6">{t(subtitle)}</p>
+    <div className="flex flex-wrap items-center justify-between gap-3"><h1 className="text-2xl font-bold">{t(title)}</h1>{canAct&&status==='FAILED'&&<button className="btn" onClick={retryAll}>{t('Retry all failed today')}</button>}</div><p className="muted mt-1 mb-6">{t(subtitle)}</p>
+    {info&&<div className="mb-4 rounded-lg bg-green-50 text-green-700 text-sm px-3 py-2">{info}</div>}
     {msg&&<div className="mb-4 rounded-lg bg-red-50 text-red-700 text-sm px-3 py-2">{msg}</div>}
     <div className="card overflow-auto"><table><thead><tr><th>{t('Employee')}</th><th>{t('Event')}</th><th>{t('Date')}</th><th>{t('Template')}</th><th>{t('Recipient')}</th><th>{t('Status')}</th><th>{t('Retries')}</th><th>{t('Error')}</th><th>{t('Last update')}</th>{canAct&&<th>{t('Actions')}</th>}</tr></thead><tbody>
       {data.length===0&&<tr><td colSpan={10} className="muted">{t('Nothing here.')}</td></tr>}

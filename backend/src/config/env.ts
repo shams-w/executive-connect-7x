@@ -101,7 +101,7 @@ const schema = z.object({
   MESSAGE_RATE_PER_SECOND: z.coerce.number()
     .positive()
     .max(50)
-    .default(5),
+    .default(1),
 
   // Encryption for saved WhatsApp settings
   SETTINGS_ENCRYPTION_KEY: z.string().default(''),

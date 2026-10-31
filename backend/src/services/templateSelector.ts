@@ -2,7 +2,9 @@ import type {EventType,Language,MessageTemplate} from '@prisma/client';
 import {prisma} from '../db.js';
 const DEFAULT_MILESTONES=new Set([1,5,10,15,20]);
 export async function selectTemplate(eventType:EventType,language:Language,yearsOfService?:number|null):Promise<MessageTemplate|null>{
-  const templates=await prisma.messageTemplate.findMany({where:{eventType,language,isActive:true},orderBy:{internalName:'asc'}});
+  // Prefer the employee's language; with none active in it, fall back to any active template for the event.
+  let templates=await prisma.messageTemplate.findMany({where:{eventType,language,isActive:true},orderBy:{internalName:'asc'}});
+  if(!templates.length)templates=await prisma.messageTemplate.findMany({where:{eventType,isActive:true},orderBy:{internalName:'asc'}});
   if(eventType==='WORK_ANNIVERSARY'){
     const milestone=yearsOfService!=null&&DEFAULT_MILESTONES.has(yearsOfService);
     if(milestone){const t=templates.find(x=>x.internalName.toLowerCase().includes('milestone'));if(t)return t;}
