@@ -551,3 +551,80 @@ export async function runDaily() {
     throw e;
   }
 }
+
+const UNSENT_EVENT = ['PENDING_APPROVAL', 'APPROVED', 'QUEUED', 'REJECTED', 'CANCELLED'] as const;
+const UNSENT_DELIVERY = ['PENDING', 'QUEUED', 'FAILED', 'CANCELLED'] as const;
+
+/**
+ * Bring today's and planned celebrations in line with the employees' current
+ * data after an edit or import: celebrations whose date no longer matches
+ * (or whose employee was deactivated) are removed if nothing was sent yet,
+ * and queued messages pick up the new number, language and years of service.
+ * Today's new dates are picked up by the scheduler's next run.
+ */
+export async function syncEmployeeEvents(employeeIds: string[]) {
+  if (!employeeIds.length) return { removed: 0 };
+
+  const settings = await runtimeSettings();
+  const today = todayInZone(settings.timezone);
+
+  const events = await prisma.celebrationEvent.findMany({
+    where: {
+      employeeId: { in: employeeIds },
+      eventDate: { gte: today },
+      status: { in: [...UNSENT_EVENT] }
+    },
+    include: { employee: true, deliveries: true }
+  });
+
+  let removed = 0;
+
+  for (const ev of events) {
+    if (ev.deliveries.some(d => !(UNSENT_DELIVERY as readonly string[]).includes(d.status))) continue;
+
+    // Midday avoids landing on the neighbouring day in the configured timezone.
+    const match = getCelebrationCandidates(
+      ev.employee,
+      new Date(ev.eventDate.getTime() + DAY_MS / 2),
+      settings.leapDayPolicy,
+      settings.timezone
+    ).find(c => c.eventType === ev.eventType);
+
+    if (!match) {
+      await prisma.$transaction([
+        prisma.messageDelivery.deleteMany({ where: { celebrationEventId: ev.id } }),
+        prisma.celebrationEvent.delete({ where: { id: ev.id } })
+      ]);
+      removed++;
+      continue;
+    }
+
+    if (match.yearsOfService !== undefined && match.yearsOfService !== ev.yearsOfService) {
+      await prisma.celebrationEvent.update({
+        where: { id: ev.id },
+        data: { yearsOfService: match.yearsOfService }
+      });
+    }
+
+    const queued = ev.deliveries.filter(d => d.status === 'QUEUED' || d.status === 'PENDING');
+    if (!queued.length) continue;
+
+    const template = (ev.templateId
+      ? await prisma.messageTemplate.findFirst({ where: { id: ev.templateId, isActive: true } })
+      : null) ?? await selectTemplate(
+      ev.eventType,
+      ev.employee.preferredLanguage,
+      match.yearsOfService ?? ev.yearsOfService
+    );
+
+    await prisma.messageDelivery.updateMany({
+      where: { id: { in: queued.map(d => d.id) } },
+      data: {
+        recipientPhoneMasked: maskPhone(ev.employee.mobile),
+        ...(template ? { templateName: template.metaTemplateName } : {})
+      }
+    });
+  }
+
+  return { removed };
+}

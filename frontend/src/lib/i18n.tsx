@@ -25,7 +25,7 @@ export function I18nProvider({children}:{children:ReactNode}){
 export function useI18n(){const v=useContext(Ctx);if(!v)throw new Error('useI18n must be used inside I18nProvider');return v;}
 
 const EVENT_LABELS:Record<string,string>={BIRTHDAY:'Birthday',WORK_ANNIVERSARY:'Work anniversary'};
-const STATUS_LABELS:Record<string,string>={PENDING_APPROVAL:'Waiting for approval',APPROVED:'Approved',REJECTED:'Rejected',QUEUED:'Queued',SENT:'Sent',DELIVERED:'Delivered',READ:'Read',FAILED:'Failed',CANCELLED:'Skipped',EXPIRED:'Expired',PENDING:'Pending'};
+const STATUS_LABELS:Record<string,string>={PENDING_APPROVAL:'Waiting for approval',APPROVED:'Approved',REJECTED:'Rejected',QUEUED:'Queued',SENT:'Sent',DELIVERED:'Delivered',READ:'Read',FAILED:'Failed',CANCELLED:'Skipped',EXPIRED:'Expired',PENDING:'Pending',SCHEDULED:'Scheduled',SKIPPED:'Skipped'};
 const ROLE_LABELS:Record<string,string>={SUPER_ADMIN:'Super Admin',HR_ADMIN:'HR Admin',COMMUNICATIONS_ADMIN:'Communications Admin',VIEWER:'Viewer'};
 export const eventLabel=(t:I18n['t'],type:string)=>t(EVENT_LABELS[type]??type);
 export const statusLabel=(t:I18n['t'],status:string)=>t(STATUS_LABELS[status]??status);
