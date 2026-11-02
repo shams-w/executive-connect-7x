@@ -21,7 +21,7 @@ function Scheduled(){
         <td className="whitespace-nowrap"><b>{dayLabel(i18n,x.daysAway,x.eventDate)}</b><div className="muted text-xs">{fmtDate(x.eventDate)}</div></td>
         <td>{x.fullName}<div className="muted text-xs">{x.employeeCode}</div></td><td>{eventLabel(t,x.eventType)}{x.yearsOfService?<div className="muted text-xs">{t('{n} year(s)',{n:x.yearsOfService})}</div>:null}</td>
         <td className="text-xs">{x.templateName??<span className="text-red-600">{t('No active template')}</span>}</td>
-        <td><span className="badge">{statusLabel(t,x.status)}</span></td><td className="text-xs max-w-xs">{x.failureReason?t(x.failureReason):'—'}</td>
+        <td><span className="badge">{statusLabel(t,x.status)}</span></td><td className="text-xs max-w-xs">{x.failureReason&&!["SENT","DELIVERED","READ"].includes(x.status)?t(x.failureReason):'—'}</td>
         {canAct&&<td className="whitespace-nowrap">{x.deliveryId&&x.status==='FAILED'&&<button className="btn py-1" onClick={()=>act(`/messages/${x.deliveryId}/retry`)}>{t('Retry')}</button>}{x.deliveryId&&x.status==='QUEUED'&&<button className="btn py-1" onClick={()=>act(`/messages/${x.deliveryId}/cancel`)}>{t('Cancel')}</button>}</td>}
       </tr>)}
     </tbody></table></div>
@@ -45,7 +45,7 @@ function History(){
       {data.length===0&&<tr><td colSpan={10} className="muted">{t('Nothing here.')}</td></tr>}
       {data.map((x:any)=><tr key={x.id}>
         <td>{x.employee.fullName}</td><td>{eventLabel(t,x.celebrationEvent.eventType)}</td><td className="whitespace-nowrap">{fmtDate(x.celebrationEvent.eventDate)}</td><td className="text-xs">{x.templateName}</td><td dir="ltr" className="text-start whitespace-nowrap">{x.recipientPhoneMasked}</td>
-        <td><span className="badge">{statusLabel(t,x.status)}</span></td><td>{x.retryCount}</td><td className="text-xs max-w-xs">{x.failureReason?t(x.failureReason):'—'}</td><td className="whitespace-nowrap text-xs">{fmtDateTime(x.updatedAt)}</td>
+        <td><span className="badge">{statusLabel(t,x.status)}</span></td><td>{x.retryCount}</td><td className="text-xs max-w-xs">{x.failureReason&&!["SENT","DELIVERED","READ"].includes(x.status)?t(x.failureReason):'—'}</td><td className="whitespace-nowrap text-xs">{fmtDateTime(x.updatedAt)}</td>
         {canAct&&<td className="whitespace-nowrap">{x.status==='FAILED'&&<button className="btn py-1" onClick={()=>act(`/messages/${x.id}/retry`)}>{t('Retry')}</button>}{x.status==='QUEUED'&&<button className="btn py-1" onClick={()=>act(`/messages/${x.id}/cancel`)}>{t('Cancel')}</button>}</td>}
       </tr>)}
     </tbody></table></div>
