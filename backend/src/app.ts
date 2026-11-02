@@ -1,6 +1,8 @@
 import express from 'express';import helmet from 'helmet';import cors from 'cors';import cookieParser from 'cookie-parser';import rateLimit from 'express-rate-limit';import {pinoHttp} from 'pino-http';import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';
 import {env} from './config/env.js';import {getWhatsAppConfig} from './services/whatsappConfig.js';import auth from './routes/auth.js';import employees from './routes/employees.js';import imports from './routes/imports.js';import celebrations from './routes/celebrations.js';import messages from './routes/messages.js';import templates from './routes/templates.js';import settings from './routes/settings.js';import webhooks from './routes/webhooks.js';import dashboard from './routes/dashboard.js';import audit from './routes/audit.js';import adminSettings from './routes/adminSettings.js';import users from './routes/users.js';
 export const app=express();
+// Railway puts one proxy in front of the app; trust it so rate limits see real client IPs.
+app.set('trust proxy',1);
 app.use(helmet());app.use(cors({origin:env.FRONTEND_URL,credentials:true}));app.use(rateLimit({windowMs:60000,limit:300,standardHeaders:true,legacyHeaders:false}));app.use(pinoHttp({redact:['req.headers.authorization','req.headers.cookie','res.headers["set-cookie"]']}));
 app.use(express.json({limit:'1mb',verify:(req:any,_res,buf)=>{req.rawBody=Buffer.from(buf)}}));app.use(cookieParser());
 app.get('/api/health',async(_req,res)=>res.json({ok:true,service:'Executive Connect',mode:(await getWhatsAppConfig()).mode,timezone:env.APP_TIMEZONE}));
