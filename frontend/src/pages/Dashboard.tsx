@@ -4,7 +4,7 @@ export default function Dashboard(){
   const {t}=useI18n();
   const {data}=useQuery({queryKey:['dashboard'],queryFn:()=>api.get('/dashboard').then(r=>r.data)});
   const cards=data?.cards??{};
-  const labels=[['todaysBirthdays',"Today's Birthdays"],['todaysAnniversaries',"Today's Anniversaries"],['upcomingCelebrations','Next 30 days'],['scheduledToday','Scheduled Today'],['sentToday','Sent Today'],['delivered','Delivered'],['read','Read'],['failed','Failed']];
+  const labels=[['todaysBirthdays',"Today's Birthdays"],['todaysAnniversaries',"Today's Anniversaries"],['upcomingCelebrations','Next 30 days'],['scheduledToday','Scheduled Today'],['sentToday','Sent Today'],['delivered','Delivered (30 days)'],['read','Read (30 days)'],['failed','Failed (30 days)']];
   const monthly=data?.charts?.monthly??[];const max=Math.max(1,...monthly.map((x:any)=>x.count));
   return <>
     <h1 className="text-2xl font-bold">{t('Dashboard')}</h1><p className="muted mt-1 mb-6">{t('Daily employee celebration operations')}</p>
